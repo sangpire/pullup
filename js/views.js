@@ -63,8 +63,9 @@ export function home(app, state, go) {
 }
 
 // ---------- 훈련 (카메라 또는 직접 입력) ----------
-function beep() {
-  try { const a = new AudioContext(), o = a.createOscillator(); o.frequency.value = 880; o.connect(a.destination); o.start(); o.stop(a.currentTime + .15); } catch {}
+let audio;
+function beep(freq = 880) {
+  try { audio ??= new AudioContext(); const o = audio.createOscillator(), g = audio.createGain(); g.gain.value = .2; o.frequency.value = freq; o.connect(g); g.connect(audio.destination); o.start(); o.stop(audio.currentTime + .15); } catch {}
 }
 
 export function workout(app, state, ex, go) {
@@ -76,27 +77,43 @@ export function workout(app, state, ex, go) {
     <div class="row"><h1 style="margin:0">${plan.name}</h1><span class="muted">${setNo}/${plan.sets}세트</span></div>
     <p class="muted">목표 ${plan.target}${plan.unit}</p>
     ${cam ? `<div class="camera"><video playsinline muted></video><canvas></canvas>
-      <div class="hud"><div class="big" id="val">–</div><div id="hint">카메라를 켜고 몸 전체와 손이 보이게 세워 두세요</div></div></div>
-      <div style="display:flex;gap:10px;margin-top:14px"><button class="btn ghost" id="camon">카메라 켜기</button><button class="btn" id="save">세트 끝</button></div>
-      <p class="muted">카메라가 어렵다면 아래에 직접 입력해도 돼요.</p>` : ''}
+      <div class="hud"><div class="big" id="val">–</div><div id="hint">폰을 세워 두고 철봉 아래 서서 몸 전체가 보이게 해 주세요</div></div></div>
+      <div style="display:flex;gap:10px;margin-top:14px">
+        <button class="btn ghost" id="camon">카메라 켜기</button>
+        <button class="btn ghost hidden" id="reset">다시 재기</button>
+        <button class="btn" id="save">세트 끝</button></div>
+      <p class="muted">3초 카운트다운 동안 바닥에 선 자세를 기준으로 잡고, 발이 떠야 시간이 올라가요. 카메라가 어렵다면 아래에 직접 입력해도 돼요.</p>` : ''}
     <div class="card"><label>기록 (${plan.unit})</label><input id="manual" type="number" min="0" step="0.5" inputmode="decimal" placeholder="${plan.target}"></div>
     ${cam ? '' : '<button class="btn" id="save">세트 끝</button>'}
-    <button class="btn ghost" id="back" style="margin-top:10px">홈으로</button>`;
-  let measured = 0;
+    <button class="btn ghost" id="back" style="margin-top:10px">기록하지 않고 나가기</button>`;
+  let measured = 0, lastLeft = 4;
   if (cam) {
+    const HINT = { none: '손과 몸이 보이게 해 주세요', stand: '철봉을 잡고 발을 떼면 시작해요', hang: '매달리는 중', mid: '버티는 중', top: '턱이 철봉 위!' };
     $('#camon').onclick = async () => {
-      $('#hint').textContent = '모델 불러오는 중…';
+      $('#camon').classList.add('hidden');
       try {
-        stopCam = await startCamera($('video'), $('canvas'), ex, u => {
+        const cam = await startCamera($('video'), $('canvas'), ex, u => {
+          if (u.phase === 'loading') { $('#hint').textContent = '모델 불러오는 중…'; return; }
+          if (u.phase === 'countdown') {
+            const n = Math.ceil(u.left / 1000);
+            $('#val').textContent = n > 0 ? n : '시작!';
+            $('#hint').textContent = u.seen ? '바닥에 선 채로 기다려 주세요' : '몸 전체가 보이게 뒤로 물러나 주세요';
+            if (n < lastLeft && state.settings.sound) beep(n > 0 ? 660 : 990);
+            lastLeft = n; measured = 0; return;
+          }
           measured = u.best;
-          $('#val').textContent = `${u.value.toFixed(u.unit === '초' ? 1 : 0)}${u.unit}`;
-          $('#hint').textContent = { none: '손과 몸이 보이게 해 주세요', hang: '매달리는 중', mid: '버티는 중', top: '턱이 철봉 위!' }[u.state];
+          const shown = u.active ? u.value : u.best;
+          $('#val').textContent = `${shown.toFixed(u.unit === '초' ? 1 : 0)}${u.unit}`;
+          $('#hint').textContent = HINT[u.state] + (u.best && !u.active ? ` · 최고 ${u.best.toFixed(u.unit === '초' ? 1 : 0)}${u.unit}` : '');
         });
-      } catch (e) { $('#hint').textContent = '카메라를 쓸 수 없어요. 직접 입력해 주세요.'; console.error(e); }
+        stopCam = cam.stop;
+        $('#reset').classList.remove('hidden');
+        $('#reset').onclick = () => { measured = 0; lastLeft = 4; $('#manual').value = ''; cam.reset(); };
+      } catch (e) { $('#camon').classList.remove('hidden'); $('#hint').textContent = '카메라를 쓸 수 없어요. 직접 입력해 주세요.'; console.error(e); }
     };
   }
   $('#save').onclick = () => {
-    const v = parseFloat($('#manual').value) || measured;
+    const v = parseFloat($('#manual').value) || Math.round(measured * 10) / 10;
     if (!v) return alert('기록이 없어요. 카메라로 재거나 직접 입력해 주세요.');
     addLog(state, ex, v, plan.unit); cleanup(); if (state.settings.sound) beep();
     const stage = STAGES[state.profile.stage - 1];
@@ -142,7 +159,16 @@ export function progress(app, state) {
     <div class="card"><canvas class="chart" id="chart"></canvas></div>
     <div class="row"><span class="muted">느리게 내려오기 최고</span><b>${best(state, 'negative')}초</b></div>
     <h2>단계</h2>
-    <ul class="steps">${STAGES.map(st => `<li class="${st.id < s ? 'done' : st.id === s ? 'cur' : 'todo'}"><span class="s"></span>${st.name}${st.id === s ? ' ← 지금' : ''}</li>`).join('')}</ul>`;
+    <ul class="steps">${STAGES.map(st => `<li class="${st.id < s ? 'done' : st.id === s ? 'cur' : 'todo'}"><span class="s"></span>${st.name}${st.id === s ? ' ← 지금' : ''}</li>`).join('')}</ul>
+    <h2>최근 기록</h2>
+    <p class="muted">잘못 잰 기록은 ✕로 지울 수 있어요.</p>
+    ${state.logs.map((l, i) => ({ l, i })).slice(-15).reverse().map(({ l, i }) => `
+      <div class="card row" style="padding:10px 14px"><span>${l.date.slice(5)} · ${EX_LABEL[l.exercise] || l.exercise}</span>
+      <span><b>${l.value}${l.unit}</b> <button class="del" data-i="${i}" aria-label="삭제">✕</button></span></div>`).join('') || '<p class="muted">아직 기록이 없어요.</p>'}`;
+  app.querySelectorAll('.del').forEach(b => b.onclick = () => {
+    const l = state.logs[+b.dataset.i];
+    if (confirm(`${l.date} ${EX_LABEL[l.exercise]} ${l.value}${l.unit} 기록을 지울까요?`)) { state.logs.splice(+b.dataset.i, 1); save(state); progress(app, state); }
+  });
   const data = series('hang'), c = $('#chart'), ctx = c.getContext('2d');
   c.width = c.clientWidth * 2; c.height = 360; ctx.scale(2, 2);
   const w = c.clientWidth, h = 180, max = Math.max(10, ...data.map(d => d[1]));
